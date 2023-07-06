@@ -4,6 +4,7 @@
 * Dependencies:
 * - bme280 library
 * - u8g2 library
+* - simpleKalmanFilter library
 *
 * Hardware:
 * - Arduino DUE (because the floating number can be double precision
@@ -20,8 +21,17 @@
 
 #include "bme280.h"
 #include <U8g2lib.h>
+#include <SimpleKalmanFilter.h>
 
 #include <Wire.h>
+
+/*
+ * SimpleKalmanFilter(e_mea, e_est, q);
+ * e_mea: Measurement Uncertainty
+ * e_est: Estimation Uncertainty
+ * q: Process Noise
+ */
+SimpleKalmanFilter pressureKalmanFilter(1, 1, 0.01);
 
 /* Grove - OLED Yellow&Blue Display 0.96(SSD1315) */
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);
@@ -69,12 +79,14 @@ void loop() {
     temp_c,
     hum_rh,
     alti_m;
+  float estim_alti_m;
 
   if (bme.Read()) {
     pres_pa = bme.pres_pa();
     temp_c = bme.die_temp_c();
     hum_rh = bme.humidity_rh();
     alti_m = getAltitude(pres_pa, 101460.0, temp_c);
+    estim_alti_m = pressureKalmanFilter.updateEstimate(alti_m);
 
     Serial.print("pres(pa):");
     Serial.print(pres_pa);
@@ -86,9 +98,11 @@ void loop() {
     Serial.print(hum_rh);
     Serial.print(",");
     Serial.print("alti(m):");
-    Serial.println(alti_m);
+    Serial.print(",");
+    Serial.print("estim_alti(m):");
+    Serial.println(estim_alti_m);
 
-    oled_display(alti_m);
+    oled_display(estim_alti_m);
   }
   delay(100);
 }
