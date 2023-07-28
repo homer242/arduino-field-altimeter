@@ -215,7 +215,7 @@ void oled_display_conf_sealevel(double sea_pres_pa)
 
   /* line */
   snprintf(buf, sizeof(buf), "%.02f", sea_pres_pa);
-  u8g2.drawStr(16,50,buf);
+  u8g2.drawStr(30,40,buf);
 
   u8g2.sendBuffer();                    // transfer internal memory to the display
 }
@@ -230,23 +230,23 @@ void oled_display_acq(const struct snsr_drv *curr_drv, int mode,
 
   /* line mode + driver */
   u8g2.drawStr(0,10,mode_str(mode));
-  u8g2.drawStr(0,64,curr_drv->name);
+  u8g2.drawStr(64,10,curr_drv->name);
 
   /* line altitude / height */
   if (mode == MODE_RELATIVE) {
-    u8g2.drawStr(16,10,"Height (m):");
+    u8g2.drawStr(0,30,"Height:");
   } else {
-    u8g2.drawStr(16,10,"Altitude (m):");
+    u8g2.drawStr(0,30,"Alti:");
   }
 
-  snprintf(buf, sizeof(buf), "%.02f", alti_m);
-  u8g2.drawStr(16,50,buf);
+  snprintf(buf, sizeof(buf), "%.02f m", alti_m);
+  u8g2.drawStr(60,30,buf);
 
   /* line temp */
-  u8g2.drawStr(32,10,"Temp (C):");
+  u8g2.drawStr(0,50,"Temp:");
 
-  snprintf(buf, sizeof(buf), "%.02f", temp_c);
-  u8g2.drawStr(32,50,buf);
+  snprintf(buf, sizeof(buf), "%.02f C", temp_c);
+  u8g2.drawStr(60,50,buf);
 
   u8g2.sendBuffer();                    // transfer internal memory to the display
 }
@@ -256,7 +256,7 @@ static void oled_display_exception(const char *err_msg)
   u8g2.clearBuffer();                   // clear the internal memory
   u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
   u8g2.drawStr(0,10,"Err!");    // write something to the internal memory
-  u8g2.drawStr(16,10,err_msg);    // write something to the internal memory
+  u8g2.drawStr(0,30,err_msg);    // write something to the internal memory
   u8g2.sendBuffer();                    // transfer internal memory to the display
 }
 
