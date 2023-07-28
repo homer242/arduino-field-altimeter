@@ -35,6 +35,8 @@
 #define PUSHBTN_DEBOUNCE_MS    50
 #define SWITCH_MODE_DELAY_MS 2000
 
+#define SEALEVELPRESSURE_PA 101325.0f
+
 /* do not change values below without modifying
  * code elsewhere.
  */
@@ -195,7 +197,7 @@ void setup() {
   }
 
   priv.curr_state = state_acq;
-  priv.sea_pres_ref = 101325.0f;
+  priv.sea_pres_ref = SEALEVELPRESSURE_PA;
 }
 
 static unsigned int sm_exception(void)
