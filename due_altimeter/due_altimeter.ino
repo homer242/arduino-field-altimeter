@@ -30,6 +30,8 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+#define BME280_CS_PIN          53
+
 #define PUSHBTN_DEBOUNCE_MS    50
 #define SWITCH_MODE_DELAY_MS 2000
 
@@ -70,7 +72,7 @@ SimpleKalmanFilter relPressureKalmanFilter(1, 1, 0.01);
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);
 
 /* BME-280 */
-bfs::Bme280 bme(&SPI, 53 /* CS pin number */);
+bfs::Bme280 bme(&SPI, BME280_CS_PIN /* CS pin number */);
 
 /* Push buttons */
 ezButton buttonSet(40 /* pin number */);
