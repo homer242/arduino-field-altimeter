@@ -3,6 +3,7 @@
 *
 * Dependencies:
 * - bme280 library
+* - ADAFRUIT bmp390 library (and its dependencies)
 * - u8g2 library
 * - simpleKalmanFilter library
 * - ezbutton library
@@ -12,6 +13,7 @@
 *                but does it make really a difference with simple precision?)
 * - OLED Yellow&Blue Display 0.96(SSD1315) connected through I2C
 * - BME 280 connected through SPI
+* - BMP 390 connected through SPI
 * - 4 push buttons connected to 40, 41, 42 and 43 digital pin numbers
 *
 * Needs and goals:
@@ -22,6 +24,8 @@
 */
 
 #include "bme280.h"
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP3XX.h>
 #include <U8g2lib.h>
 #include <SimpleKalmanFilter.h>
 #include <ezButton.h>
@@ -30,10 +34,12 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+#define BMP390_CS_PIN          52
 #define BME280_CS_PIN          53
 
 #define PUSHBTN_DEBOUNCE_MS    50
 #define SWITCH_MODE_DELAY_MS 2000
+#define SWITCH_SNSR_DELAY_MS 2000
 
 #define SEALEVELPRESSURE_PA 101325.0f
 
@@ -76,6 +82,9 @@ U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SD
 /* BME-280 */
 bfs::Bme280 bme(&SPI, BME280_CS_PIN /* CS pin number */);
 
+/* BMP390 */
+Adafruit_BMP3XX bmp390;
+
 /* Push buttons */
 ezButton buttonSet(40 /* pin number */);
 ezButton buttonOk(41 /* pin number */);
@@ -84,16 +93,172 @@ ezButton buttonDown(43 /* pin number */);
 
 ezButton *buttonsArray[] = { &buttonSet, &buttonOk, &buttonUp, &buttonDown };
 
+typedef int (*snsr_init)(void);
+typedef int (*snsr_acq_do)(double *hum_rh, double *temp_c, double *press_pa);
+
+struct snsr_drv {
+  const char *name;
+  bool init;
+  struct {
+    snsr_init init;
+    snsr_acq_do acq;
+  } ops;
+};
+
+static int bme280_init(void);
+static int bme280_acq(double *hum_rh, double *temp_c, double *press_pa);
+
+static struct snsr_drv bme280_drv = {
+  .name = "bme280",
+  .init = false,
+  .ops = {
+    .init = bme280_init,
+    .acq = bme280_acq,
+  },
+};
+
+static int bmp390_init(void);
+static int bmp390_acq(double *hum_rh, double *temp_c, double *press_pa);
+
+static struct snsr_drv bmp390_drv = {
+  .name = "bmp390",
+  .init = false,
+  .ops = {
+    .init = bmp390_init,
+    .acq = bmp390_acq,
+  }
+};
+
+static struct snsr_drv *snsr_drvs[] = {
+  &bmp390_drv,
+  &bme280_drv,
+};
+
 /* Machina */
 static struct {
   int mode;
   unsigned int curr_state;
+  struct snsr_drv *curr_snsr_drv;
 
   double sea_pres_ref;
   double rel_pres_ref;
 
   double last_estim_pres;
 } priv;
+
+/*
+ * sensor drivers
+ */
+static int bme280_init(void)
+{
+  /* Initialize the BME-280 */
+  if (!bme.Begin()) {
+    Serial.println("Error initializing communication with BME-280");
+    return -1;
+  }
+
+  return 0;
+}
+
+static int bme280_acq(double *hum_rh, double *temp_c, double *press_pa)
+{
+  if (!bme.Read())
+    return -1;
+
+  *hum_rh = bme.humidity_rh();
+  *temp_c = bme.die_temp_c();
+  *press_pa = bme.pres_pa();
+
+  return 0;
+}
+
+static int bmp390_init(void)
+{
+  if (! bmp390.begin_SPI(BMP390_CS_PIN)) {
+    Serial.println("Could not find a valid BMP3 sensor, check wiring!");
+    return -1;
+  }
+
+  // Set up oversampling and filter initialization
+  bmp390.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp390.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp390.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  bmp390.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  return 0;
+}
+
+static int bmp390_acq(double *hum_rh, double *temp_c, double *press_pa)
+{
+  if (! bmp390.performReading())
+    return -1;
+
+  *hum_rh = 0;
+  *temp_c = bmp390.temperature;
+  *press_pa = bmp390.pressure;
+
+  return 0;
+}
+
+/*
+ *
+ */
+void oled_display_conf_sealevel(double sea_pres_pa)
+{
+  char buf[16];
+
+  u8g2.clearBuffer();                   // clear the internal memory
+  u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
+
+  /* line title */
+  u8g2.drawStr(0,10,"Sea level pressure (Pa)");
+
+  /* line */
+  snprintf(buf, sizeof(buf), "%.02f", sea_pres_pa);
+  u8g2.drawStr(16,50,buf);
+
+  u8g2.sendBuffer();                    // transfer internal memory to the display
+}
+
+void oled_display_acq(const struct snsr_drv *curr_drv, int mode,
+                      double temp_c, double alti_m)
+{
+  char buf[16];
+
+  u8g2.clearBuffer();                   // clear the internal memory
+  u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
+
+  /* line mode + driver */
+  u8g2.drawStr(0,10,mode_str(mode));
+  u8g2.drawStr(0,64,curr_drv->name);
+
+  /* line altitude / height */
+  if (mode == MODE_RELATIVE) {
+    u8g2.drawStr(16,10,"Height (m):");
+  } else {
+    u8g2.drawStr(16,10,"Altitude (m):");
+  }
+
+  snprintf(buf, sizeof(buf), "%.02f", alti_m);
+  u8g2.drawStr(16,50,buf);
+
+  /* line temp */
+  u8g2.drawStr(32,10,"Temp (C):");
+
+  snprintf(buf, sizeof(buf), "%.02f", temp_c);
+  u8g2.drawStr(32,50,buf);
+
+  u8g2.sendBuffer();                    // transfer internal memory to the display
+}
+
+static void oled_display_exception(const char *err_msg)
+{
+  u8g2.clearBuffer();                   // clear the internal memory
+  u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
+  u8g2.drawStr(0,10,"Err!");    // write something to the internal memory
+  u8g2.drawStr(16,10,err_msg);    // write something to the internal memory
+  u8g2.sendBuffer();                    // transfer internal memory to the display
+}
 
 static const char *mode_str(int mode)
 {
@@ -115,65 +280,50 @@ static sm_handler get_sm_hdl(unsigned int state)
   return sm_hdls[state];
 }
 
+static void switch_to_next_snsr(void)
+{
+  size_t nsnsrs;
+  bool found_curr;
+  unsigned int i,
+    curr_snsr_idx;
+
+  nsnsrs = 0;
+  found_curr = false;
+  for(i = 0; i < ARRAY_SIZE(snsr_drvs); i++) {
+    if (!found_curr && priv.curr_snsr_drv == snsr_drvs[i]) {
+      curr_snsr_idx = i;
+      found_curr = true;
+    }
+
+    if (snsr_drvs[i]->init)
+      nsnsrs += 1;
+  }
+
+  if (!found_curr) {
+    oled_display_exception("no found snsr!");
+    while (1) { }
+  }
+
+  if (nsnsrs < 2)
+    return; /* nothing to do */
+
+  /* take the next sensor */
+  i = (curr_snsr_idx + 1) % nsnsrs;
+  while (1) {
+    if (snsr_drvs[i]->init) {
+      priv.curr_snsr_drv = snsr_drvs[i];
+      break;
+    }
+
+    i = (i + 1) % nsnsrs;
+  }
+}
+
 double getAltitude( double pres, double pres_ref, double temp )
 {
   double a1 = pow( ( pres_ref / pres ), ( 1 / 5.257 ) );
   double a = (a1 - 1) * ( temp + 273.15 ) / 0.0065f;
   return a;
-}
-
-void oled_display_conf_sealevel(double sea_pres_pa)
-{
-  char buf[16];
-
-  u8g2.clearBuffer();                   // clear the internal memory
-  u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
-
-  /* line title */
-  u8g2.drawStr(0,10,"Sea level pressure (Pa)");
-
-  /* line */
-  snprintf(buf, sizeof(buf), "%.02f", sea_pres_pa);
-  u8g2.drawStr(16,50,buf);
-
-  u8g2.sendBuffer();                    // transfer internal memory to the display
-}
-
-void oled_display_acq(int mode, double temp_c, double alti_m)
-{
-  char buf[16];
-
-  u8g2.clearBuffer();                   // clear the internal memory
-  u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
-
-  /* line mode */
-  u8g2.drawStr(0,10,mode_str(mode));
-
-  /* line altitude / height */
-  if (mode == MODE_RELATIVE) {
-    u8g2.drawStr(16,10,"Height (m):");
-  } else {
-    u8g2.drawStr(16,10,"Altitude (m):");
-  }
-
-  snprintf(buf, sizeof(buf), "%.02f", alti_m);
-  u8g2.drawStr(16,50,buf);
-
-  /* line temp */
-  u8g2.drawStr(32,10,"Temp (C):");
-
-  snprintf(buf, sizeof(buf), "%.02f", temp_c);
-  u8g2.drawStr(32,50,buf);
-
-  u8g2.sendBuffer();                    // transfer internal memory to the display
-}
-
-static void oled_display_exception(void)
-{
-  u8g2.clearBuffer();                   // clear the internal memory
-  u8g2.setFont(u8g2_font_luBIS08_tf);   // choose a suitable font
-  u8g2.drawStr(0,10,"Err!");    // write something to the internal memory
-  u8g2.sendBuffer();                    // transfer internal memory to the display
 }
 
 void setup() {
@@ -190,9 +340,21 @@ void setup() {
   for(i = 0; i < ARRAY_SIZE(buttonsArray); i++){
     buttonsArray[i]->setDebounceTime(PUSHBTN_DEBOUNCE_MS);
   }
-  /* Initialize the BME-280 */
-  if (!bme.Begin()) {
-    Serial.println("Error initializing communication with BME-280");
+  /* Initialize sensors */
+  priv.curr_snsr_drv = NULL;
+  for(i = 0; i < ARRAY_SIZE(snsr_drvs); i++) {
+    snsr_drvs[i]->init = (snsr_drvs[i]->ops.init() == 0);
+    if (!snsr_drvs[i]->init) {
+      Serial.print("Error initializing communication with ");
+      Serial.println(snsr_drvs[i]->name);
+    } else {
+      if (priv.curr_snsr_drv == NULL)
+        priv.curr_snsr_drv = snsr_drvs[i];
+    }
+  }
+
+  if (priv.curr_snsr_drv == NULL) {
+    oled_display_exception("no found sensors");
     while (1) {}
   }
 
@@ -202,7 +364,7 @@ void setup() {
 
 static unsigned int sm_exception(void)
 {
-  oled_display_exception();
+  oled_display_exception("state machine error");
 
   return state_exception;
 }
@@ -211,6 +373,9 @@ static unsigned int sm_acq(void)
 {
   static unsigned long btn_ok_pressed_start_time;
   static int btn_ok_prev_is_pressed;
+  static bool latchSwitchSnsr,
+    switchSnsrSeqStarted;
+  static unsigned long switch_snsr_seq_start_time;
 
   unsigned long currentTime;
   double pres_pa,
@@ -224,11 +389,7 @@ static unsigned int sm_acq(void)
 
   /***************************/
   /* acquisition and process */
-  if (bme.Read()) {
-    pres_pa = bme.pres_pa();
-    temp_c = bme.die_temp_c();
-    hum_rh = bme.humidity_rh();
-
+  if (priv.curr_snsr_drv->ops.acq(&hum_rh, &temp_c, &pres_pa) == 0) {
     if (priv.mode == MODE_RELATIVE) {
       alti_m = getAltitude(pres_pa, priv.rel_pres_ref, temp_c);
       estim_alti_m = relPressureKalmanFilter.updateEstimate(alti_m);
@@ -256,11 +417,13 @@ static unsigned int sm_acq(void)
 
     priv.last_estim_pres = estim_alti_m;
 
-    oled_display_acq(priv.mode, temp_c, estim_alti_m);
+    oled_display_acq(priv.curr_snsr_drv, priv.mode, temp_c, estim_alti_m);
   }
 
   /************************/
   /* handle button events */
+
+  /* OK button => switch mode */
   btn_ok_is_pressed = buttonOk.isPressed();
   if (btn_ok_is_pressed) {
     if (!btn_ok_prev_is_pressed) {
@@ -284,6 +447,7 @@ static unsigned int sm_acq(void)
     btn_ok_prev_is_pressed = false;
   }
 
+  /* SET button */
   if (buttonSet.isPressed()) {
     if (priv.mode == MODE_RELATIVE) {
       priv.rel_pres_ref = priv.last_estim_pres;
@@ -291,6 +455,28 @@ static unsigned int sm_acq(void)
       /* switch to config state */
       return state_conf;
     }
+  }
+
+  /* UP + DOWN => use another sensor */
+  if (!latchSwitchSnsr && buttonUp.isPressed() && buttonDown.isPressed()) {
+    if (!switchSnsrSeqStarted) {
+      switch_snsr_seq_start_time = currentTime;
+      switchSnsrSeqStarted = true;
+    }
+
+    if (currentTime - switch_snsr_seq_start_time >= SWITCH_SNSR_DELAY_MS) {
+      /* switch to another sensor if possible */
+      latchSwitchSnsr = true;
+      switchSnsrSeqStarted = false;
+
+      switch_to_next_snsr();
+    }
+  } else {
+    if (switchSnsrSeqStarted)
+      switchSnsrSeqStarted = false;
+
+    if (latchSwitchSnsr)
+      latchSwitchSnsr = false;
   }
 
   return state_acq;
