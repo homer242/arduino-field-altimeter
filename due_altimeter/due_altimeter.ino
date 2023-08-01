@@ -34,6 +34,11 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+#define PUSHBUTTON_SET          4
+#define PUSHBUTTON_OK           8
+#define PUSHBUTTON_DOWN         6
+#define PUSHBUTTON_UP           7
+
 #define BMP390_CS_PIN          52
 #define BME280_CS_PIN          53
 
@@ -42,6 +47,9 @@
 #define SWITCH_SNSR_DELAY_MS 2000
 
 #define SEALEVELPRESSURE_PA 101325.0f
+
+#define DT_FAST_MS             25
+#define DT_NOMINAL_MS         100
 
 /* do not change values below without modifying
  * code elsewhere.
@@ -86,10 +94,10 @@ bfs::Bme280 bme(&SPI, BME280_CS_PIN /* CS pin number */);
 Adafruit_BMP3XX bmp390;
 
 /* Push buttons */
-ezButton buttonSet(40 /* pin number */);
-ezButton buttonOk(41 /* pin number */);
-ezButton buttonUp(42 /* pin number */);
-ezButton buttonDown(43 /* pin number */);
+ezButton buttonSet(PUSHBUTTON_SET, INPUT);
+ezButton buttonOk(PUSHBUTTON_OK, INPUT);
+ezButton buttonUp(PUSHBUTTON_UP, INPUT);
+ezButton buttonDown(PUSHBUTTON_DOWN, INPUT);
 
 ezButton *buttonsArray[] = { &buttonSet, &buttonOk, &buttonUp, &buttonDown };
 
@@ -136,6 +144,7 @@ static struct snsr_drv *snsr_drvs[] = {
 
 /* Machina */
 static struct {
+  unsigned int dt_ms;
   int mode;
   unsigned int curr_state;
   struct snsr_drv *curr_snsr_drv;
@@ -180,10 +189,10 @@ static int bmp390_init(void)
   }
 
   // Set up oversampling and filter initialization
-  bmp390.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
-  bmp390.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp390.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
+  bmp390.setPressureOversampling(BMP3_OVERSAMPLING_16X);
   bmp390.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
-  bmp390.setOutputDataRate(BMP3_ODR_50_HZ);
+  bmp390.setOutputDataRate(BMP3_ODR_25_HZ);
 
   return 0;
 }
@@ -329,6 +338,8 @@ double getAltitude( double pres, double pres_ref, double temp )
 void setup() {
   unsigned int i;
 
+  priv.dt_ms = DT_NOMINAL_MS;
+
   /* Serial monitor for showing status and data */
   Serial.begin(115200);
   while (!Serial) {}
@@ -366,6 +377,8 @@ static unsigned int sm_exception(void)
 {
   oled_display_exception("state machine error");
 
+  priv.dt_ms = DT_NOMINAL_MS;
+
   return state_exception;
 }
 
@@ -385,6 +398,12 @@ static unsigned int sm_acq(void)
   float estim_alti_m;
   int btn_ok_is_pressed;
 
+  if (priv.mode == MODE_RELATIVE) {
+    priv.dt_ms = DT_FAST_MS;
+  } else {
+    priv.dt_ms = DT_NOMINAL_MS;
+  }
+
   currentTime = millis();
 
   /***************************/
@@ -398,24 +417,24 @@ static unsigned int sm_acq(void)
       estim_alti_m = absPressureKalmanFilter.updateEstimate(alti_m);
     }
 
-    if (Serial.availableForWrite()) {
-      Serial.print("pres(pa):");
-      Serial.print(pres_pa);
-      Serial.print(",");
-      Serial.print("temp(c):");
-      Serial.print(temp_c);
-      Serial.print(",");
-      Serial.print("humidity(rh):");
-      Serial.print(hum_rh);
-      Serial.print(",");
-      Serial.print("alti(m):");
-      Serial.print(alti_m);
-      Serial.print(",");
-      Serial.print("estim_alti(m):");
-      Serial.println(estim_alti_m);
-    }
+    /* if (Serial.availableForWrite()) { */
+    /*   Serial.print("pres(pa):"); */
+    /*   Serial.print(pres_pa); */
+    /*   Serial.print(","); */
+    /*   Serial.print("temp(c):"); */
+    /*   Serial.print(temp_c); */
+    /*   Serial.print(","); */
+    /*   Serial.print("humidity(rh):"); */
+    /*   Serial.print(hum_rh); */
+    /*   Serial.print(","); */
+    /*   Serial.print("alti(m):"); */
+    /*   Serial.print(alti_m); */
+    /*   Serial.print(","); */
+    /*   Serial.print("estim_alti(m):"); */
+    /*   Serial.println(estim_alti_m); */
+    /* } */
 
-    priv.last_estim_pres = estim_alti_m;
+    priv.last_estim_pres = pres_pa;
 
     oled_display_acq(priv.curr_snsr_drv, priv.mode, temp_c, estim_alti_m);
   }
@@ -424,7 +443,8 @@ static unsigned int sm_acq(void)
   /* handle button events */
 
   /* OK button => switch mode */
-  btn_ok_is_pressed = buttonOk.isPressed();
+  btn_ok_is_pressed = (buttonOk.getState() == 0);
+
   if (btn_ok_is_pressed) {
     if (!btn_ok_prev_is_pressed) {
       btn_ok_pressed_start_time = currentTime;
@@ -432,6 +452,10 @@ static unsigned int sm_acq(void)
     }
 
     if (currentTime - btn_ok_pressed_start_time >= SWITCH_MODE_DELAY_MS) {
+      if (Serial.availableForWrite()) {
+        Serial.println("switching mode...");
+      }
+
       /* switch mode */
       priv.mode = priv.mode ^ 1;
 
@@ -458,7 +482,7 @@ static unsigned int sm_acq(void)
   }
 
   /* UP + DOWN => use another sensor */
-  if (!latchSwitchSnsr && buttonUp.isPressed() && buttonDown.isPressed()) {
+  if (!latchSwitchSnsr && buttonUp.getState() == 0 && buttonDown.getState() == 0) {
     if (!switchSnsrSeqStarted) {
       switch_snsr_seq_start_time = currentTime;
       switchSnsrSeqStarted = true;
@@ -484,19 +508,48 @@ static unsigned int sm_acq(void)
 
 static unsigned int sm_conf(void)
 {
+  static int lastStateBtnUp = 1,
+    lastStateBtnDown = 1;
+  static size_t cntUp,
+    cntDown;
+  int btnUpRead,
+    btnDownRead;
+
+  priv.dt_ms = DT_FAST_MS;
+
   /************************/
   /* handle button events */
   if (buttonOk.isPressed()) {
     return state_acq;
   }
 
-  if (buttonUp.isPressed()) {
-    priv.sea_pres_ref = floorf(priv.sea_pres_ref) + 1.0f;
+  /* up */
+  btnUpRead = buttonUp.getState();
+  if (btnUpRead == 0) {
+    if (lastStateBtnUp == 0) {
+      cntUp = min(cntUp + 1, 59);
+    } else {
+      cntUp = 5;
+    }
+
+    priv.sea_pres_ref = floorf(priv.sea_pres_ref) + ((cntUp / 5) * 1.0f);
   }
 
-  if (buttonDown.isPressed()) {
-    priv.sea_pres_ref = floorf(priv.sea_pres_ref) - 1.0f;
+  lastStateBtnUp = btnUpRead;
+
+  /* down */
+  btnDownRead = buttonDown.getState();
+  if (btnDownRead == 0) {
+    if (lastStateBtnDown == 0) {
+      cntDown = min(cntDown + 1, 59);
+    } else {
+      cntDown = 5;
+    }
+
+    priv.sea_pres_ref = floorf(priv.sea_pres_ref) - ((cntDown / 5) * 1.0f);
   }
+
+  lastStateBtnDown = btnDownRead;
 
   /************************/
   /* display */
@@ -518,5 +571,5 @@ void loop() {
 
   priv.curr_state = state_hdl();
 
-  delay(100);
+  delay(priv.dt_ms);
 }
