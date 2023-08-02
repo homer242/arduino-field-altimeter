@@ -82,7 +82,6 @@ static sm_handler sm_hdls[] = {
  * q: Process Noise
  */
 SimpleKalmanFilter absPressureKalmanFilter(1, 1, 0.01);
-SimpleKalmanFilter relPressureKalmanFilter(1, 1, 0.01);
 
 /* Grove - OLED Yellow&Blue Display 0.96(SSD1315) */
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);
@@ -150,9 +149,10 @@ static struct {
   struct snsr_drv *curr_snsr_drv;
 
   double sea_pres_ref;
-  double rel_pres_ref;
 
-  double last_estim_pres;
+  double rel_alti_ref;
+
+  double last_alti_m;
 } priv;
 
 /*
@@ -230,7 +230,7 @@ void oled_display_conf_sealevel(double sea_pres_pa)
 }
 
 void oled_display_acq(const struct snsr_drv *curr_drv, int mode,
-                      double temp_c, double alti_m)
+                      double temp_c, double elevation_m)
 {
   char buf[16];
 
@@ -248,7 +248,7 @@ void oled_display_acq(const struct snsr_drv *curr_drv, int mode,
     u8g2.drawStr(0,30,"Alti:");
   }
 
-  snprintf(buf, sizeof(buf), "%.02f m", alti_m);
+  snprintf(buf, sizeof(buf), "%.02f m", elevation_m);
   u8g2.drawStr(60,30,buf);
 
   /* line temp */
@@ -395,7 +395,8 @@ static unsigned int sm_acq(void)
     temp_c,
     hum_rh,
     alti_m;
-  float estim_alti_m;
+  float estim_alti_m,
+    elevation_m;
   int btn_ok_is_pressed;
 
   if (priv.mode == MODE_RELATIVE) {
@@ -409,13 +410,8 @@ static unsigned int sm_acq(void)
   /***************************/
   /* acquisition and process */
   if (priv.curr_snsr_drv->ops.acq(&hum_rh, &temp_c, &pres_pa) == 0) {
-    if (priv.mode == MODE_RELATIVE) {
-      alti_m = getAltitude(pres_pa, priv.rel_pres_ref, temp_c);
-      estim_alti_m = relPressureKalmanFilter.updateEstimate(alti_m);
-    } else {
-      alti_m = getAltitude(pres_pa, priv.sea_pres_ref, temp_c);
-      estim_alti_m = absPressureKalmanFilter.updateEstimate(alti_m);
-    }
+    alti_m = getAltitude(pres_pa, priv.sea_pres_ref, temp_c);
+    estim_alti_m = absPressureKalmanFilter.updateEstimate(alti_m);
 
     /* if (Serial.availableForWrite()) { */
     /*   Serial.print("pres(pa):"); */
@@ -434,9 +430,15 @@ static unsigned int sm_acq(void)
     /*   Serial.println(estim_alti_m); */
     /* } */
 
-    priv.last_estim_pres = pres_pa;
+    if (priv.mode == MODE_RELATIVE) {
+      elevation_m = estim_alti_m - priv.rel_alti_ref;
+    } else {
+      elevation_m = estim_alti_m;
+    }
 
-    oled_display_acq(priv.curr_snsr_drv, priv.mode, temp_c, estim_alti_m);
+    priv.last_alti_m = estim_alti_m;
+
+    oled_display_acq(priv.curr_snsr_drv, priv.mode, temp_c, elevation_m);
   }
 
   /************************/
@@ -461,7 +463,7 @@ static unsigned int sm_acq(void)
 
       /* update some values because of the new mode */
       if (priv.mode == MODE_RELATIVE) {
-        priv.rel_pres_ref = priv.last_estim_pres;
+        priv.rel_alti_ref = priv.last_alti_m;
       }
 
       /* start a new count */
@@ -474,7 +476,7 @@ static unsigned int sm_acq(void)
   /* SET button */
   if (buttonSet.isPressed()) {
     if (priv.mode == MODE_RELATIVE) {
-      priv.rel_pres_ref = priv.last_estim_pres;
+      priv.rel_alti_ref = priv.last_alti_m;
     } else {
       /* switch to config state */
       return state_conf;
